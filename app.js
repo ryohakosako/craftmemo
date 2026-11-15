@@ -1,140 +1,63 @@
 'use strict';
-const $ = id => document.getElementById(id);
-const KEY = 'craftmemo.v1';
-const {validate, calculate, sample, positive} = CraftModel;
-let data = sample(), editing = null, draft = [], collapsed = new Set(), createTarget = false, branchParent = null;
-const fmt = n => n.toLocaleString('ja-JP');
-function el(tag, className, text) {const n = document.createElement(tag); if(className)n.className=className;if(text!==undefined)n.textContent=text;return n;}
-function notify(text) {$('message').textContent=text;$('message').hidden=!text;}
-function save() {
-  try {localStorage.setItem(KEY, JSON.stringify(data));$('save-status').textContent='✓ このブラウザに保存済み';}
-  catch {$('save-status').textContent='保存できませんでした';notify('自動保存できません。JSON書き出しでデータを保管してください。');}
+const $=id=>document.getElementById(id), M=CraftModel;
+const KEY='craftmemo.v2', uid=()=>crypto.randomUUID(), fmt=n=>n.toLocaleString('ja-JP');
+let data=M.migrate(M.sample()), editing=null, draft=[], branchParent=null, treeEditing=null, collapsed=new Set(), loadFailed=false;
+function el(tag,cls,text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text;return n;}
+function notify(text){$('message').textContent=text;$('message').hidden=!text;}
+function current(){return data.trees.find(t=>t.id===data.activeTreeId);}
+function save(){if(loadFailed){notify('元データ保護のため自動保存を停止しています。有効なJSONを読み込むと再開できます。');return;}try{localStorage.setItem(KEY,JSON.stringify(data));$('save-status').textContent='✓ このブラウザに保存済み';}catch{notify('自動保存できません。JSON書き出しで保管してください。');$('save-status').textContent='保存できませんでした';}}
+try{const stored=localStorage.getItem(KEY)??localStorage.getItem('craftmemo.v1');if(stored)data=M.migrate(JSON.parse(stored));}catch{loadFailed=true;notify('保存データを読み込めません。自動保存を停止してサンプルを表示します。有効なJSONを読み込むと再開できます。');}
+function commit(next){M.validateProject(next);data=next;collapsed.clear();refresh();save();}
+function options(select,entries,value){select.replaceChildren();for(const [id,name]of entries){const o=el('option','',name);o.value=id;select.append(o);}if(value!==undefined)select.value=value;}
+function targets(){const tree=current();options($('tree-select'),data.trees.map(t=>[t.id,t.name]),data.activeTreeId||'');options($('target'),data.items.map(i=>[i.id,i.name]),tree?.target||'');$('quantity').value=tree?.quantity||1;for(const id of ['target','quantity','rename-tree','delete-tree'])$(id).disabled=!tree;$('restore-branches').hidden=!tree?.removed.length;$('item-names').replaceChildren();for(const item of data.items){const o=el('option');o.value=item.name;$('item-names').append(o);}}
+function list(){
+  $('items').replaceChildren();$('item-count').textContent=`(${data.items.length})`;const q=$('search').value.trim().toLocaleLowerCase();
+  for(const item of data.items.filter(x=>x.name.toLocaleLowerCase().includes(q))){const row=el('div','item'),info=el('div','item-info',item.name),button=el('button','','編集');info.append(el('small','',item.recipe?`1回で ${fmt(item.recipe.output)}個 · 材料${item.recipe.materials.length}種`:'最終素材 · レシピなし'));button.setAttribute('aria-label',item.name+'を編集');button.onclick=()=>openEditor(item.id);row.append(info,button);$('items').append(row);}
+  if(!$('items').childNodes.length)$('items').append(el('p','empty','該当するアイテムがありません。'));
 }
-try {
-  const stored = localStorage.getItem(KEY);
-  if(stored){const parsed=JSON.parse(stored);validate(parsed);data=parsed;}
-} catch {notify('保存データを読み込めませんでした。元の保存データは上書きせず、サンプルを表示しています。編集前に必要なバックアップをご確認ください。');}
-if(!data.items.some(x=>x.id===data.target))data.target=data.items[0]?.id || '';
-if(!positive(data.quantity))data.quantity=1;
-$('quantity').value=data.quantity;
-function targets() {
-  $('target').replaceChildren();
-  if(!data.items.length){const o=el('option','','アイテムを追加してください');o.value='';$('target').append(o);}
-  for(const item of data.items){const o=el('option','',item.name);o.value=item.id;$('target').append(o);}
-  $('target').value=data.target;
+function renderTree(node){
+  const path=JSON.stringify(node.path),wrap=el('div','node'),head=el('div','node-head'),card=el('div','node-card'+(node.raw?' raw':'')),title=el('button','node-name',node.name),amount=el('strong','node-amount',fmt(node.needed));
+  title.setAttribute('aria-label',node.name+'を編集');title.onclick=()=>openEditor(node.id);amount.append(el('small','','個'));card.append(title,amount,el('span','node-meta',node.raw?'素材':node.crafts?fmt(node.crafts)+'回分を割当':'共有の余りで供給'));
+  if(node.path.length>1){const del=el('button','node-delete','×');del.setAttribute('aria-label',node.name+'の枝を削除');del.title='この枝と子孫だけを削除';del.onclick=async()=>{if(await confirmLocal(`「${node.name}」のこの枝と子孫を削除します。他の場所と共通アイテムは残ります。`)){try{commit(M.removeBranch(data,data.activeTreeId,node.path));}catch(e){notify(e.message);}}};card.append(del);}
+  if(node.children.length){const fold=el('button','node-fold',collapsed.has(path)?'▸':'▾');fold.setAttribute('aria-label',node.name+'の材料を'+(collapsed.has(path)?'展開':'折りたたむ'));fold.setAttribute('aria-expanded',String(!collapsed.has(path)));fold.onclick=()=>{if(collapsed.has(path))collapsed.delete(path);else collapsed.add(path);results();};card.append(fold);}
+  const add=el('button','node-add','＋');add.setAttribute('aria-label',node.name+'に材料を追加');add.title='共有レシピに材料を追加';add.onclick=()=>openBranch(node.id);head.append(card,add);wrap.append(head);
+  if(node.children.length&&!collapsed.has(path)){const children=el('div','children');node.children.forEach(child=>children.append(renderTree(child)));wrap.append(children);}return wrap;
 }
-function list() {
-  $('items').replaceChildren();$('item-count').textContent=`(${data.items.length})`;
-  const query=$('search').value.trim().toLocaleLowerCase();
-  for(const item of data.items.filter(x=>x.name.toLocaleLowerCase().includes(query))){
-    const row=el('div','item'),icon=el('span','item-icon'+(item.recipe?'':' raw'),item.recipe?'◇':'▧'),info=el('div','item-info',item.name),button=el('button','','編集');
-    info.append(el('small','',item.recipe?`1回で ${fmt(item.recipe.output)}個 · 材料${item.recipe.materials.length}種`:'最終素材 · レシピなし'));
-    button.setAttribute('aria-label',`${item.name}を編集`);button.onclick=()=>openEditor(item.id);row.append(icon,info,button);$('items').append(row);
-  }
-  if(!$('items').childNodes.length)$('items').append(el('p','empty',query?'一致するアイテムがありません。':'最初のアイテムを追加しましょう。'));
-}
-function renderTree(node,path='0') {
-  const wrapper=el('div','node'),head=el('div','node-head'),card=el('div','node-card'+(node.raw?' raw':''));
-  const title=el('button','node-name',node.name);title.setAttribute('aria-label',node.name+'を編集');title.onclick=()=>openEditor(node.id);
-  const amount=el('strong','node-amount',fmt(node.needed));amount.append(el('small','','個'));
-  const info=el('span','node-meta',node.raw?'素材':node.crafts?fmt(node.crafts)+'回分を割当':'共有の余りで供給');
-  card.append(title,amount,info);
-  if(node.children.length){const toggle=el('button','node-fold',collapsed.has(path)?'▸':'▾');toggle.setAttribute('aria-label',node.name+'の材料を'+(collapsed.has(path)?'展開':'折りたたむ'));toggle.setAttribute('aria-expanded',String(!collapsed.has(path)));toggle.onclick=()=>{if(collapsed.has(path))collapsed.delete(path);else collapsed.add(path);results();};card.append(toggle);}
-  const add=el('button','node-add','＋');add.setAttribute('aria-label',node.name+'に材料を追加');add.title='材料を追加';add.onclick=()=>openBranch(node.id);head.append(card,add);wrapper.append(head);
-  if(node.children.length&&!collapsed.has(path)){const children=el('div','children');node.children.forEach((child,i)=>children.append(renderTree(child,path+'.'+i)));wrapper.append(children);}
-  return wrapper;
-}
-function results() {
-  for(const id of ['tree','raw','crafted'])$(id).replaceChildren();$('raw-count').textContent='0種類';
-  if(!data.items.length){const add=el('button','empty-add','＋ 最初のアイテム');add.onclick=()=>{createTarget=true;openEditor();};$('tree').append(add);return;}
-  try {
-    const result=calculate(data,$('target').value,Number($('quantity').value));
-    $('tree').append(renderTree(result.tree));
-    if(result.truncated)$('tree').append(el('p','empty','ツリーは2,000項目まで表示しています。全体集計は省略せず計算しています。'));
-    const raw=result.totals.filter(x=>x.raw),crafted=result.totals.filter(x=>!x.raw);
-    $('raw-count').textContent=`${raw.length}種類`;
-    for(const row of raw){const div=el('div','raw-row'),n=el('strong','',fmt(row.needed));n.append(el('small','',' 個'));div.append(el('span','',row.name),n);$('raw').append(div);}
-    for(const row of crafted){const div=el('div','craft-row'),metrics=el('div','metrics');for(const [label,value,unit] of [['必要総数',row.needed,'個'],['クラフト',row.crafts,'回'],['余り',row.surplus,'個']]){const cell=el('span','',label);cell.append(el('strong','',`${fmt(value)} ${unit}`));metrics.append(cell);}div.append(el('h3','',row.name),metrics);$('crafted').append(div);}
-    if(!crafted.length)$('crafted').append(el('p','empty','選択したアイテムは最終素材です。'));
-    if(!raw.length)$('raw').append(el('p','empty','最終素材はありません。'));
-  } catch(error){$('tree').append(el('p','empty',error.message));$('tree').firstChild.setAttribute('role','alert');}
+function results(){
+  for(const id of ['tree','raw','crafted'])$(id).replaceChildren();$('raw-count').textContent='0種類';if(!current()){$('tree').append(el('p','empty','「＋ ツリーを追加」から始めましょう。'));return;}
+  try{const project=structuredClone(data);project.trees.find(t=>t.id===data.activeTreeId).quantity=Number($('quantity').value);const result=M.calculateTree(project,data.activeTreeId);$('tree').append(renderTree(result.tree));if(result.truncated)$('tree').append(el('p','empty','ツリーは2,000項目まで表示。全体集計は省略していません。'));
+    const raw=result.totals.filter(t=>t.raw),crafted=result.totals.filter(t=>!t.raw);$('raw-count').textContent=`${raw.length}種類`;
+    for(const item of raw){const row=el('div','raw-row'),count=el('strong','',fmt(item.needed));count.append(el('small','',' 個'));row.append(el('span','',item.name),count);$('raw').append(row);}
+    for(const item of crafted){const row=el('div','craft-row'),metrics=el('div','metrics');for(const [label,value,unit]of [['必要総数',item.needed,'個'],['クラフト',item.crafts,'回'],['余り',item.surplus,'個']]){const cell=el('span','',label);cell.append(el('strong','',`${fmt(value)} ${unit}`));metrics.append(cell);}row.append(el('h3','',item.name),metrics);if(item.variants>1)row.append(el('p','hint','削除状態の異なる枝は別にクラフト計算'));$('crafted').append(row);}
+    if(!raw.length)$('raw').append(el('p','empty','集める素材はありません。'));if(!crafted.length)$('crafted').append(el('p','empty','レシピのない素材です。'));
+  }catch(e){const n=el('p','empty',e.message);n.setAttribute('role','alert');$('tree').append(n);}
 }
 function refresh(){targets();list();results();}
-function showEditorError(text){$('editor-error').textContent=text;$('editor-error').hidden=!text;}
-function materials() {
-  $('materials').replaceChildren();
-  draft.forEach((m,i)=>{
-    const row=el('div','material-row'),label=el('label','','素材'),select=el('select'),qLabel=el('label','','必要個数'),q=el('input'),del=el('button','','✕');
-    select.required=true;
-    const blank=el('option','','選択してください');blank.value='';select.append(blank);
-    for(const item of data.items.filter(x=>x.id!==editing)){const o=el('option','',item.name);o.value=item.id;select.append(o);}
-    select.value=m.id;select.onchange=()=>{draft[i].id=select.value;};q.type='number';q.min='1';q.step='1';q.required=true;q.value=m.quantity;q.oninput=()=>{draft[i].quantity=Number(q.value);};
-    del.type='button';del.setAttribute('aria-label',`材料${i+1}を削除`);del.onclick=()=>{draft.splice(i,1);materials();};label.append(select);qLabel.append(q);row.append(label,qLabel,del);$('materials').append(row);
-  });
+function editorError(text){$('editor-error').textContent=text;$('editor-error').hidden=!text;}
+function materials(){
+  $('materials').replaceChildren();draft.forEach((m,i)=>{const row=el('div','material-row'),label=el('label','','素材名（登録済み／新規）'),input=el('input'),ql=el('label','','必要個数'),q=el('input'),del=el('button','','×');input.required=true;input.maxLength=100;input.setAttribute('list','item-names');input.value=m.name;input.placeholder='名前を入力・選択';input.oninput=()=>{draft[i].name=input.value;draft[i].id=null;};q.type='number';q.min='1';q.step='1';q.required=true;q.value=m.quantity;q.oninput=()=>{draft[i].quantity=Number(q.value);};del.type='button';del.setAttribute('aria-label',`材料${i+1}を削除`);del.onclick=()=>{draft.splice(i,1);materials();recipeVisibility();};label.append(input);ql.append(q);row.append(label,ql,del);$('materials').append(row);});
 }
-function recipeVisibility(){const enabled=$('has-recipe').checked;$('recipe-fields').hidden=!enabled;$('output').disabled=!enabled;for(const input of $('materials').querySelectorAll('input,select'))input.disabled=!enabled;}
-function openEditor(id=null){
-  editing=id;if(id)createTarget=false;const item=data.items.find(x=>x.id===id);
-  $('editor-title').textContent=item?'アイテムを編集':'アイテムを追加';$('item-name').value=item?.name || '';$('has-recipe').checked=!!item?.recipe;$('output').value=item?.recipe?.output || 1;
-  draft=item?.recipe?structuredClone(item.recipe.materials):[];$('delete-item').hidden=!item;showEditorError('');materials();recipeVisibility();$('library').close();$('editor').showModal();$('item-name').focus();
-}
-$('add-item').onclick=()=>{createTarget=true;openEditor();};$('close-editor').onclick=()=>$('editor').close();$('has-recipe').onchange=recipeVisibility;
-$('add-material').onclick=()=>{draft.push({id:'',quantity:1});materials();recipeVisibility();};
-$('item-form').onsubmit=event=>{
-  event.preventDefault();
-  try {
-    const next=structuredClone(data),id=editing || crypto.randomUUID(),item={id,name:$('item-name').value.trim(),recipe:$('has-recipe').checked?{output:Number($('output').value),materials:structuredClone(draft)}:null};
-    const index=next.items.findIndex(x=>x.id===id);if(index<0)next.items.push(item);else next.items[index]=item;
-    validate(next);if(!next.target || createTarget)next.target=id;createTarget=false;data=next;$('editor').close();notify('');collapsed.clear();refresh();save();
-  }catch(error){showEditorError(error.message);}
-};
-$('delete-item').onclick=async()=>{
-  const users=data.items.filter(x=>x.recipe?.materials.some(m=>m.id===editing));
-  if(users.length){showEditorError(`次のレシピで使用中です：${users.map(x=>x.name).join('、')}。先に材料から外してください。`);return;}
-  const item=data.items.find(x=>x.id===editing);if(!await confirmLocal(`「${item.name}」を削除しますか？`))return;
-  data.items=data.items.filter(x=>x.id!==editing);if(data.target===editing)data.target=data.items[0]?.id || '';$('editor').close();notify('');collapsed.clear();refresh();save();
-};
-$('target').onchange=()=>{data.target=$('target').value;collapsed.clear();notify('');results();save();};
-$('quantity').oninput=()=>{results();if(positive(Number($('quantity').value))){data.quantity=Number($('quantity').value);save();}};
-$('search').oninput=list;
-$('expand').onclick=()=>{collapsed.clear();results();};
-$('collapse').onclick=()=>{collapsed.add('0');results();};
-$('sample').onclick=async()=>{if(!await confirmLocal('現在のアイテムとレシピをサンプルで置き換えます。必要なデータは先にJSON書き出ししてください。'))return;data=sample();collapsed.clear();$('quantity').value=data.quantity;$('search').value='';notify('');refresh();save();};
-$('export').onclick=()=>{const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=el('a');a.href=url;a.download='craftmemo.json';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);};
-$('import').onclick=()=>$('file').click();
-$('file').onchange=async()=>{
-  const file=$('file').files[0];if(!file)return;
-  try {
-    if(file.size>2*1024*1024)throw new Error('JSONは2MB以内で読み込んでください。');
-    const next=JSON.parse(await file.text());validate(next);
-    if(next.target!==undefined && !next.items.some(x=>x.id===next.target) && !(next.target===''&&!next.items.length))throw new Error('完成品の参照が不正です。');
-    if(next.quantity!==undefined&&!positive(next.quantity))throw new Error('完成希望個数は正の整数で指定してください。');
-    if(!await confirmLocal('現在のアイテム・レシピを読み込んだJSONで置き換えますか？'))return;
-    data={version:1,items:next.items,target:next.target || next.items[0]?.id || '',quantity:next.quantity || 1};collapsed.clear();$('quantity').value=data.quantity;$('search').value='';notify('JSONを読み込みました。');refresh();save();
-  } catch(error){notify(`読み込めませんでした：${error.message} 現在のデータは変更していません。`);}
-  finally{$('file').value='';}
-};
-
-$('library-toggle').onclick=()=>$('library').showModal();
-$('close-library').onclick=()=>$('library').close();
+function recipeVisibility(){const enabled=$('has-recipe').checked;$('recipe-fields').hidden=!enabled;$('output').disabled=!enabled;for(const input of $('materials').querySelectorAll('input'))input.disabled=!enabled;}
+function openEditor(id=null){editing=id;const item=data.items.find(x=>x.id===id);$('editor-title').textContent=item?'共通アイテムを編集':'共通アイテムを登録';$('item-name').value=item?.name||'';$('has-recipe').checked=!!item?.recipe;$('output').value=item?.recipe?.output||1;draft=(item?.recipe?.materials||[]).map(m=>({id:m.id,name:data.items.find(x=>x.id===m.id).name,quantity:m.quantity}));$('delete-item').hidden=!item;editorError('');materials();recipeVisibility();$('library').close();$('editor').showModal();$('item-name').focus();}
+$('add-item').onclick=()=>openEditor();$('close-editor').onclick=()=>$('editor').close();$('has-recipe').onchange=recipeVisibility;$('add-material').onclick=()=>{draft.push({name:'',quantity:1});materials();recipeVisibility();};
+$('item-form').onsubmit=event=>{event.preventDefault();try{const next=structuredClone(data),name=$('item-name').value.trim(),existing=next.items.find(x=>x.name.trim()===name&&x.id!==editing);if(existing&&editing&&name!==data.items.find(x=>x.id===editing).name.trim())throw new Error('同名アイテムが登録済みです。そのアイテムを使用してください。');if(existing&&!editing){$('editor').close();notify('登録済みの同名アイテムを開きました。');openEditor(existing.id);return;}const id=editing||M.resolveItem(next,name,uid),item=next.items.find(x=>x.id===id);item.name=name;item.recipe=$('has-recipe').checked?{output:Number($('output').value),materials:draft.map(m=>({id:m.id || M.resolveItem(next,m.name,uid),quantity:m.quantity}))}:null;M.validateProject(next);$('editor').close();notify('');commit(next);}catch(e){editorError(e.message);}};
+$('delete-item').onclick=async()=>{if(data.items.some(x=>x.recipe?.materials.some(m=>m.id===editing))||data.trees.some(t=>t.target===editing)){editorError('レシピまたはツリーで使用中です。枝だけを消すにはツリー上の「×」を使ってください。');return;}const id=editing,item=data.items.find(x=>x.id===id);if(!await confirmLocal(`共通アイテム「${item.name}」を登録から削除しますか？`))return;const next=structuredClone(data);next.items=next.items.filter(x=>x.id!==id);for(const t of next.trees)t.removed=t.removed.filter(path=>!path.includes(id));$('editor').close();commit(next);};
+function openTreeEditor(id=null){treeEditing=id;const tree=data.trees.find(t=>t.id===id);$('tree-dialog-title').textContent=tree?'ツリーを編集':'ツリーを追加';$('tree-name').value=tree?.name||'';$('tree-root').value=tree?data.items.find(x=>x.id===tree.target).name:'';$('tree-quantity').value=tree?.quantity||1;$('tree-error').hidden=true;$('tree-dialog').showModal();$('tree-name').focus();}
+$('add-tree').onclick=()=>openTreeEditor();$('rename-tree').onclick=()=>openTreeEditor(data.activeTreeId);$('close-tree').onclick=()=>$('tree-dialog').close();
+$('tree-form').onsubmit=event=>{event.preventDefault();try{let next;if(treeEditing){next=structuredClone(data);const tree=next.trees.find(t=>t.id===treeEditing),target=$('tree-root').value.trim()===next.items.find(x=>x.id===tree.target).name.trim()?tree.target:M.resolveItem(next,$('tree-root').value,uid);if(target!==tree.target)tree.removed=[];Object.assign(tree,{name:$('tree-name').value.trim(),target,quantity:Number($('tree-quantity').value)});}else next=M.addTree(data,$('tree-name').value,$('tree-root').value,Number($('tree-quantity').value),uid);M.validateProject(next);$('tree-dialog').close();notify('');commit(next);}catch(e){$('tree-error').textContent=e.message;$('tree-error').hidden=false;}};
+$('delete-tree').onclick=async()=>{const t=current();if(!t||!await confirmLocal(`ツリー「${t.name}」を削除します。共通アイテムと他のツリーは残ります。`))return;const next=structuredClone(data);next.trees=next.trees.filter(x=>x.id!==t.id);next.activeTreeId=next.trees[0]?.id||null;commit(next);};
+$('tree-select').onchange=()=>{data.activeTreeId=$('tree-select').value;collapsed.clear();refresh();save();};
+$('target').onchange=()=>{const t=current();t.target=$('target').value;t.removed=[];collapsed.clear();results();save();$('restore-branches').hidden=true;};
+$('quantity').oninput=()=>{results();if(current()&&M.positive(Number($('quantity').value))){current().quantity=Number($('quantity').value);save();}};
+$('restore-branches').onclick=async()=>{if(!await confirmLocal('このツリーで削除した枝をすべて復元しますか？'))return;const next=structuredClone(data);next.trees.find(t=>t.id===data.activeTreeId).removed=[];commit(next);};
+$('search').oninput=list;$('expand').onclick=()=>{collapsed.clear();results();};$('collapse').onclick=()=>{if(current())collapsed.add(JSON.stringify([current().target]));results();};$('library-toggle').onclick=()=>$('library').showModal();$('close-library').onclick=()=>$('library').close();
 function branchMode(){const existing=$('branch-form').querySelector('input[name="branch-mode"]:checked').value==='existing';$('branch-name-label').hidden=existing;$('branch-existing-label').hidden=!existing;$('branch-name').disabled=existing;$('branch-existing').disabled=!existing;$('branch-existing').required=existing;}
 for(const radio of $('branch-form').querySelectorAll('input[name="branch-mode"]'))radio.onchange=branchMode;
-function openBranch(id){
-  branchParent=id;const item=data.items.find(x=>x.id===id);$('branch-title').textContent=item.name+' に材料を追加';$('branch-name').value='';$('branch-output').value=item.recipe?.output || 1;$('branch-quantity').value=1;$('branch-error').hidden=true;
-  $('branch-existing').replaceChildren();for(const candidate of data.items.filter(x=>x.id!==id&&!item.recipe?.materials.some(m=>m.id===x.id))){const option=el('option','',candidate.name);option.value=candidate.id;$('branch-existing').append(option);}
-  $('branch-form').querySelector('input[value="new"]').checked=true;branchMode();$('branch-dialog').showModal();$('branch-name').focus();
-}
+function openBranch(id){branchParent=id;const item=data.items.find(x=>x.id===id);$('branch-title').textContent=item.name+' に材料を追加';$('branch-name').value='';$('branch-output').value=item.recipe?.output||1;$('branch-quantity').value=1;$('branch-error').hidden=true;options($('branch-existing'),data.items.filter(x=>x.id!==id&&!item.recipe?.materials.some(m=>m.id===x.id)).map(x=>[x.id,x.name]));$('branch-form').querySelector('input[value="new"]').checked=true;branchMode();$('branch-dialog').showModal();$('branch-name').focus();}
 $('close-branch').onclick=()=>$('branch-dialog').close();
-$('branch-form').onsubmit=event=>{
-  event.preventDefault();
-  try {
-    const next=structuredClone(data),parent=next.items.find(x=>x.id===branchParent),existing=$('branch-form').querySelector('input[name="branch-mode"]:checked').value==='existing';
-    const id=existing?$('branch-existing').value:crypto.randomUUID();
-    if(!existing)next.items.push({id,name:$('branch-name').value.trim(),recipe:null});
-    parent.recipe={output:Number($('branch-output').value),materials:[...(parent.recipe?.materials || []),{id,quantity:Number($('branch-quantity').value)}]};
-    validate(next);data=next;$('branch-dialog').close();collapsed.clear();notify('');refresh();save();
-  }catch(error){$('branch-error').textContent=error.message;$('branch-error').hidden=false;}
-};
+$('branch-form').onsubmit=event=>{event.preventDefault();try{const next=structuredClone(data),parent=next.items.find(x=>x.id===branchParent),existing=$('branch-form').querySelector('input[name="branch-mode"]:checked').value==='existing',id=existing?$('branch-existing').value:M.resolveItem(next,$('branch-name').value,uid),previous=parent.recipe?.materials||[];if(previous.some(m=>m.id===id))throw new Error('共有レシピに登録済みの材料です。数量変更は名前から編集、削除した枝は「削除した枝を復元」を使ってください。');parent.recipe={output:Number($('branch-output').value),materials:[...previous,{id,quantity:Number($('branch-quantity').value)}]};M.validateProject(next);$('branch-dialog').close();notify('');commit(next);}catch(e){$('branch-error').textContent=e.message;$('branch-error').hidden=false;}};
+$('sample').onclick=async()=>{if(!await confirmLocal('全ツリーと共通アイテムをサンプルで置き換えます。必要なデータは先にJSON書き出ししてください。'))return;loadFailed=false;notify('');commit(M.migrate(M.sample()));};
+$('export').onclick=()=>{const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=el('a');a.href=url;a.download='craftmemo.json';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);};
+$('import').onclick=()=>$('file').click();$('file').onchange=async()=>{const file=$('file').files[0];if(!file)return;try{if(file.size>2*1024*1024)throw new Error('JSONは2MB以内で読み込んでください。');const next=M.migrate(JSON.parse(await file.text()));if(!await confirmLocal('全ツリーと共通アイテムを読み込んだJSONで置き換えますか？'))return;loadFailed=false;notify('JSONを読み込みました。');commit(next);}catch(e){notify(`読み込めません：${e.message} 現在のデータは変更していません。`);}finally{$('file').value='';}};
+function confirmLocal(message){return new Promise(resolve=>{const dialog=$('confirmation');$('confirmation-message').textContent=message;let finished=false;function finish(value){if(finished)return;finished=true;dialog.close();resolve(value);}$('confirm-yes').onclick=()=>finish(true);$('confirm-no').onclick=()=>finish(false);dialog.oncancel=e=>{e.preventDefault();finish(false);};dialog.showModal();$('confirm-no').focus();});}
 refresh();
-
-function confirmLocal(message){return new Promise(resolve=>{const dialog=$('confirmation');$('confirmation-message').textContent=message;let finished=false;function finish(value){if(finished)return;finished=true;dialog.close();resolve(value);}$('confirm-yes').onclick=()=>finish(true);$('confirm-no').onclick=()=>finish(false);dialog.oncancel=event=>{event.preventDefault();finish(false);};dialog.showModal();$('confirm-no').focus();});}
