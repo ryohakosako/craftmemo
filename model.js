@@ -67,8 +67,9 @@
   function sample() {
     return {version: 1, target: 'a', quantity: 3, items: [
       {id:'a', name:'完成品A', recipe:{output:1, materials:[{id:'b',quantity:2},{id:'c',quantity:3}]}},
-      {id:'b', name:'中間素材B', recipe:{output:2, materials:[{id:'d',quantity:3}]}},
-      {id:'c', name:'素材C', recipe:null}, {id:'d', name:'素材D', recipe:null}
+      {id:'b', name:'中間素材B', recipe:{output:2, materials:[{id:'d',quantity:3},{id:'e',quantity:1}]}},
+      {id:'c', name:'素材C', recipe:null}, {id:'d', name:'素材D', recipe:null},
+      {id:'e', name:'素材E', recipe:null}
     ]};
   }
   function validateProject(data) {
